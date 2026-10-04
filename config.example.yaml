@@ -1,0 +1,157 @@
+debug: false
+#本项目名称
+project_name: "mall-agent"
+#gin监听的地址
+gin_addr: ":80"
+#访问项目的域名,端口默认80(如webhook所用)
+domain: "https://www.domain.com"
+#放置静态文件的目录
+static_dir: "static"
+# gin日志文件
+gin_log_path: "log/gin.log"
+# 运行日志文件
+run_log_path: "log/run.log"
+# 日志保留天数 (默认为7天, 0表示不清理)
+log_retention_days: 7
+# 时区
+tz: "Asia/Shanghai"
+# 允许跨域的域名
+cors:
+  - "*"
+# 认证配置
+auth:
+  # Chatwoot仪表板应用Token
+  dashboard: ""
+  # 商城后台嵌入页面的Token
+  keyword: ""
+# Redis配置
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  # 分布式锁的过期时间(秒)
+  lock_expiry: 30
+  # 会话历史记录的过期时间(秒)
+  conversation_history_ttl: 3600
+  # 获取会话历史记录锁的过期时间(秒)
+  history_lock_expiry: 10
+chatwoot:
+  # Chatwoot部署地址
+  url: "http://127.0.0.1:3000"
+  # 店铺ID
+  account_id: 1
+  # 秘钥 (用于需要客服权限的操作, 如获取快捷回复, 转接人工等)
+  auth: ""
+  # 机器人秘钥 (用于机器人回复消息, 切换输入状态等)
+  bot_auth: ""
+  # 客服团队ID配置
+  teams:
+    # 售前团队ID (商品咨询)
+    pre_sales_id: 0
+    # 售后团队ID (订单咨询)
+    after_sales_id: 0
+    # 默认兜底团队ID
+    default_id: 0
+# LLM配置, 最多可配3个, 小模型在前排序
+llm:
+  - # LLM的大小, small|medium|large
+    size: small
+    # LLM的api地址, "v1"结尾
+    url: "http://127.0.0.1:11434/v1"
+    # LLM模型名称
+    model: "qwen3:latest"
+    # LLM模型秘钥
+    auth: ""
+    # 超时时间(秒)
+    timeout: 30
+    # LLM的温度,不设置则由LLM服务决定, qwen3默认0.6
+    temperature: 0.6
+  - size: medium
+    url: "http://127.0.0.1:11434/v1"
+    model: "qwen3:latest"
+    auth: ""
+  - size: large
+    url: "http://127.0.0.1:11434/v1"
+    model: "qwen3:latest"
+    auth: ""
+# 配置向量化模型;中途更换模型可能因dim不同而报错
+llm_embedding:
+  # LLM的api地址, "v1"结尾
+  url: "http://127.0.0.1:11434/v1"
+  # LLM模型名称
+  model: "qwen3-embedding:latest"
+    # LLM模型秘钥
+  auth: ""
+  # (秒)单个字符串向量化场景的超时时间
+  timeout: 5
+  # (秒)后台批量处理场景的超时时间
+  batch_timeout: 60
+# 向量数据库配置
+vector_db:
+  # 服务地址
+  url: "http://127.0.0.1:8000"
+  # 认证Token
+  auth: ""
+  # 集合名称
+  collection_name: chatwoot_keywords
+# AI客服相关配置
+ai:
+  # 提示词长度限制
+  max_prompt_length: 1000
+  # 同步Chatwoot快捷回复时, 对 short_code 字段的长度限制
+  max_short_code_length: 255
+  # 关键字前缀出现该值,则加入到向量数据库中做语义匹配
+  semantic_prefix: "ai@"
+  # 关键字前缀出现该值,则同时用于精确匹配和语义匹配
+  hybrid_prefix: "ai+@"
+  # 向量搜索返回的条数
+  vector_search_top_k: 5
+  # 向量搜索结果的最低相似度阈值(0-1), 高于此阈值才直接回复
+  vector_similarity_threshold: 0.9
+  # 向量搜索结果的最低相似度阈值(0-1), 高于此阈值才作为LLM的参考
+  vector_search_min_similarity: 0.75
+  # 主模型的自定义采样温度
+  agent_temperature: 0.5
+  # 分诊小模型的自定义采样温度
+  triage_temperature: 0.2
+  # 为分诊台提供向量搜索结果作为上下文时，取最相关的前N个问题(预设回复)
+  triage_context_questions: 2
+  # 分诊台获取的最大历史消息数量(轮数)
+  triage_max_history_rounds: 2
+  # 分诊台超时时间(秒)
+  triage_timeout: 10
+  # 转人工宽限期(秒);当系统被自动转给人工(如系统错误)后, 在宽限期内又收到新消息, AI会重新接管会话(如AI处理成功,将撤销"转人工"操作).
+  transfer_grace_period: 5
+  # 人工模式宽限期(秒); 当一个会话被人工客服处理后，在该宽限期内，AI不会主动介入。宽限期过后，AI会重新接管会话。
+  human_mode_grace_period: 900
+  # 发送的商品/订单等上下文卡片的去重有效期(秒), 0表示不启用
+  item_card_ttl: 21600
+  # AI处理(包括精确匹配和向量检索和LLM处理)的总超时时间(秒)
+  async_job_timeout: 60
+  # 传递给大型LLM的最大历史消息数量(轮数) (0表示不限制, chatwoot的api默认返回20条)
+  chat_max_history_rounds: 5
+  # ReAct 最大思考循环次数
+  max_react_rounds: 5
+  # 单轮对话中最多保留的Assistant消息数量,建议5-10
+  max_assistant_per_round: 5
+  # 知识库定时同步的最小间隔(秒);避免任务短时间内重复执行。
+  keyword_sync_interval: 300
+  # 修改知识库后，触发自动重载的防抖延迟时间(秒); 避免任务短时间内重复执行。
+  keyword_reload_debounce: 600
+  # 历史消息最大保留时间(秒), 超过此时间的消息将被过滤, 默认86400(24小时)
+  history_max_age: 86400
+  # 转人工提示消息的冷却时间(秒), 避免频繁发送转人工提示
+  transfer_msg_cooldown: 300
+  # 用于触发转人工的关键词列表
+  transfer_keywords:
+    - 人工
+    - 人工客服
+    - 转人工
+# MCP服务配置
+mcp_servers:
+  # MCP服务命名
+  mcp_name:
+    # MCP服务的地址
+    url: "http://127.0.0.1:8080"
+    # MCP服务的认证Token
+    auth: ""

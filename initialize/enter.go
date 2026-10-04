@@ -1,0 +1,84 @@
+package initialize
+
+import (
+	"context"
+	"io"
+	"sync"
+
+	"github.com/robfig/cron/v3"
+	"github.com/twbworld/agent/global"
+	"github.com/twbworld/agent/task"
+	"golang.org/x/sync/errgroup"
+)
+
+// Initializer 统一管理项目的所有初始化工作
+type Initializer struct {
+	cron           *cron.Cron
+	logFileClosers []io.Closer
+	reloadLock     sync.Mutex // 用于热重载的锁
+	taskManager    *task.Manager
+}
+
+// Run 并发执行所有核心服务的初始化
+func (i *Initializer) Run() error {
+	eg, _ := errgroup.WithContext(context.Background())
+
+	// 关键任务，失败会终止程序
+	eg.Go(i.initChatwoot)
+	eg.Go(i.initRedis)
+
+	// 非关键任务，失败只打印日志，不影响启动
+	eg.Go(func() error {
+		_ = i.initVectorDb()
+		return nil
+	})
+	eg.Go(func() error {
+		_ = i.initLlm()
+		return nil
+	})
+	eg.Go(func() error {
+		_ = i.initLlmEmbedding()
+		return nil
+	})
+	eg.Go(func() error {
+		_ = i.initMcp()
+		return nil
+	})
+
+	return eg.Wait()
+}
+
+// Close 优雅地关闭和释放所有资源
+func (i *Initializer) Close() {
+	if i.mcpClose() == nil {
+		global.Log.Info("MCP客户端已关闭")
+	}
+	if i.vectorDbClose() == nil {
+		global.Log.Info("VectorDb客户端已关闭")
+	}
+	if i.redisClose() == nil {
+		global.Log.Info("Redis客户端已关闭")
+	}
+	i.timerStop()
+	_ = i.logClose()
+}
+
+// logClose 关闭或刷新日志组件
+func (i *Initializer) logClose() error {
+	var lastErr error
+	for _, closer := range i.logFileClosers {
+		if err := closer.Close(); err != nil {
+			// 记录最后一个错误，但继续尝试关闭其他文件
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// StartSystem 启动系统级服务，如定时器和数据加载
+func (i *Initializer) StartSystem(taskManager *task.Manager) {
+	if err := i.timerStart(taskManager); err != nil {
+		panic(err)
+	}
+	i.loadData(taskManager)
+}

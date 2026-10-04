@@ -1,0 +1,21 @@
+package user
+
+import "github.com/twbworld/agent/task"
+
+type ServiceGroup struct {
+	ActionService  ActionService
+	LlmService     LlmService
+	VectorService  VectorService
+	HistoryService HistoryService
+	Validator      Validator
+}
+
+func NewServiceGroup(taskManager *task.Manager) ServiceGroup {
+	return ServiceGroup{
+		ActionService:  NewActionService(),
+		LlmService:     NewLlmService(),
+		VectorService:  NewVectorService(),
+		HistoryService: NewHistoryService(),
+		Validator:      &validator{},
+	}
+}

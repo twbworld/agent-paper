@@ -1,0 +1,324 @@
+package initialize
+
+import (
+	"bytes"
+	"context"
+	"encoding/json/v2"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/sashabaranov/go-openai"
+	"github.com/sirupsen/logrus"
+	"github.com/twbworld/agent/dao"
+	"github.com/twbworld/agent/global"
+	"github.com/twbworld/agent/internal/chatwoot"
+	"github.com/twbworld/agent/internal/embedding"
+	"github.com/twbworld/agent/internal/llm"
+	"github.com/twbworld/agent/internal/mcp"
+	"github.com/twbworld/agent/internal/redis"
+	"github.com/twbworld/agent/internal/vector"
+	"github.com/twbworld/agent/model/enum"
+	"github.com/twbworld/agent/utils"
+	"golang.org/x/sync/errgroup"
+)
+
+type llmTransport struct {
+	Base http.RoundTripper
+}
+
+func (t *llmTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// 1. 卫语句检查：非目标请求直接透传，0 级嵌套
+	enabled, _ := req.Context().Value(llm.DisableThinkingKey).(bool)
+	if !enabled || req.Body == nil {
+		return t.Base.RoundTrip(req)
+	}
+
+	// 2. 注入参数（内部做好容错，失败也不中断主请求）
+	_ = injectDisableThinking(req)
+
+	return t.Base.RoundTrip(req)
+}
+
+// injectDisableThinking 篡改请求体，注入 {"enable_thinking": false}
+func injectDisableThinking(req *http.Request) error {
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return err
+	}
+	// 防御性保底：读取后立即恢复未修改的 Body，确保后续无论在哪一步出错退出，原请求都不受损
+	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+	var bodyMap map[string]any
+	if err := json.Unmarshal(bodyBytes, &bodyMap); err != nil {
+		return err
+	}
+
+	bodyMap["enable_thinking"] = false
+
+	newBodyBytes, err := json.Marshal(bodyMap)
+	if err != nil {
+		return err
+	}
+
+	// 覆写篡改后的请求体
+	req.Body = io.NopCloser(bytes.NewReader(newBodyBytes))
+	req.ContentLength = int64(len(newBodyBytes))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(newBodyBytes)), nil
+	}
+
+	return nil
+}
+
+// setupLogFile 是一个辅助函数，用于创建和打开一个每日轮转的日志文件。
+func (i *Initializer) setupLogFile(logPath string) (*os.File, error) {
+	// 采用更通用的日志命名规范, 例如: gin.log -> gin.log.2025-10-28
+	dateSuffix := time.Now().In(global.Tz).Format("2006-01-02")
+	dailyLogPath := fmt.Sprintf("%s.%s", logPath, dateSuffix)
+
+	if err := utils.CreateFile(dailyLogPath); err != nil {
+		return nil, fmt.Errorf("创建日志文件 '%s' 失败: %w", dailyLogPath, err)
+	}
+
+	file, err := os.OpenFile(dailyLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("打开日志文件 '%s' 失败: %w", dailyLogPath, err)
+	}
+
+	i.logFileClosers = append(i.logFileClosers, file)
+	return file, nil
+}
+
+// CustomJSONFormatter for logrus to set timezone
+type CustomJSONFormatter struct {
+	logrus.JSONFormatter
+}
+
+func (f *CustomJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	entry.Time = entry.Time.In(global.Tz)
+	return f.JSONFormatter.Format(entry)
+}
+
+// InitLog 初始化logrus日志库
+func (i *Initializer) InitLog() error {
+	runfile, err := i.setupLogFile(global.Config.RunLogPath)
+	if err != nil {
+		return fmt.Errorf("初始化运行日志失败: %w", err)
+	}
+
+	global.Log = logrus.New()
+	global.Log.SetFormatter(&CustomJSONFormatter{
+		TimestampFormat: time.RFC3339,
+		FieldMap: logrus.FieldMap{
+			logrus.FieldKeyLevel: "level",
+			logrus.FieldKeyMsg:   "msg",
+			logrus.FieldKeyTime:  "time",
+		},
+	})
+	if global.Config.Debug {
+		global.Log.SetLevel(logrus.DebugLevel)
+	} else {
+		global.Log.SetLevel(logrus.InfoLevel)
+	}
+
+	global.Log.SetOutput(io.MultiWriter(os.Stdout, runfile))
+	return nil
+}
+
+func (i *Initializer) InitTz() error {
+	Location, err := time.LoadLocation(global.Config.Tz)
+	if err != nil {
+		return fmt.Errorf("时区配置失败[siortuj]: %w", err)
+	}
+	global.Tz = Location
+	return nil
+}
+
+// initRedis 初始化Redis客户端
+func (i *Initializer) initRedis() error {
+	client, err := redis.NewClient(
+		global.Config.Redis.Addr,
+		global.Config.Redis.Password,
+		int(global.Config.Redis.DB),
+	)
+	if err != nil {
+		return fmt.Errorf("初始化Redis客户端失败: %w", err)
+	}
+	global.RedisClient = client
+	global.Log.Info("初始化Redis服务成功")
+	return nil
+}
+
+// redisClose 关闭Redis客户端连接
+func (i *Initializer) redisClose() error {
+	if global.RedisClient != nil {
+		return global.RedisClient.Close()
+	}
+	return nil
+}
+
+func (i *Initializer) initVectorDb() error {
+	client, err := vector.NewClient(
+		global.Config.VectorDb.Url,
+		global.Config.VectorDb.Auth,
+	)
+	if err != nil {
+		global.Log.Warnf("创建VectorDb客户端失败: %v", err)
+		return err
+	}
+
+	// 通过心跳检测验证与VectorDb服务的连接
+	err = client.Heartbeat(context.Background())
+	if err != nil {
+		global.Log.Warnf("无法连接到VectorDb服务 (url: %s): %v", global.Config.VectorDb.Url, err)
+		return err
+	}
+
+	global.VectorDb = client
+	dao.App.VectorDb.CollectionName = global.Config.VectorDb.CollectionName
+	global.Log.Info("初始化VectorDb服务成功")
+	return nil
+}
+
+// vectorDbClose 关闭VectorDb客户端连接
+func (i *Initializer) vectorDbClose() error {
+	if global.VectorDb != nil {
+		return global.VectorDb.Close()
+	}
+	return nil
+}
+
+func (i *Initializer) initChatwoot() error {
+	client := chatwoot.NewClient(
+		global.Config.Chatwoot.Url,
+		int(global.Config.Chatwoot.AccountId),
+		global.Config.Chatwoot.Auth,
+		global.Config.Chatwoot.BotAuth,
+		global.Log,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.GetAccountDetails(ctx); err != nil {
+		return fmt.Errorf("无法连接到Chatwoot服务 (url: %s, token: AgentApiToken): %w", global.Config.Chatwoot.Url, err)
+	}
+
+	global.ChatwootService = client
+	global.Log.Info("初始化Chatwoot服务成功")
+	return nil
+}
+
+// initLlm 初始化LLM服务
+func (i *Initializer) initLlm() error {
+	if len(global.Config.Llm) == 0 {
+		return fmt.Errorf("未配置任何LLM")
+	}
+
+	llmClients := make(map[enum.LlmSize]*openai.Client, len(global.Config.Llm))
+	for _, cfg := range global.Config.Llm {
+		config := openai.DefaultConfig(cfg.Auth)
+		config.BaseURL = cfg.Url
+
+		// 动态获取业务层配置的超时时间作为基准
+		// HTTP客户端的超时时间必须 >= 业务Context的超时时间，否则Context控制将失效
+		minSafeTimeout := global.Config.Ai.AsyncJobTimeout
+
+		finalTimeout := max(cfg.Timeout, minSafeTimeout)
+
+		config.HTTPClient = &http.Client{
+			Timeout:   time.Duration(finalTimeout) * time.Second,
+			Transport: &llmTransport{Base: http.DefaultTransport},
+		}
+		llmClients[enum.LlmSize(cfg.Size)] = openai.NewClientWithConfig(config)
+	}
+
+	g, gCtx := errgroup.WithContext(context.Background())
+	// 并发地对所有配置的LLM服务进行连接测试
+	for _, cfg := range global.Config.Llm {
+		g.Go(func() error {
+			size := enum.LlmSize(cfg.Size)
+			client := llmClients[size]
+
+			// 使用 errgroup 的 context，以便在任何一个 goroutine 失败时可以取消其他的
+			reqCtx, cancel := context.WithTimeout(gCtx, 5*time.Second)
+			defer cancel()
+
+			// 通过ListModels接口验证服务是否可用
+			if _, err := client.ListModels(reqCtx); err != nil {
+				return fmt.Errorf("无法连接到LLM服务 (size: %s, url: %s): %w", size, cfg.Url, err)
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		global.Log.Warnf("初始化LLM服务失败: %v", err)
+		return err
+	}
+
+	global.LlmService = llm.NewClient(
+		global.Log,
+		llmClients,
+		global.Config.Llm,
+	)
+	global.Log.Info("初始化LLM服务成功")
+	return nil
+}
+
+// initLlmEmbedding 初始化向量化服务
+func (i *Initializer) initLlmEmbedding() error {
+	cfg := global.Config.LlmEmbedding
+	config := openai.DefaultConfig(cfg.Auth)
+	config.BaseURL = cfg.Url
+
+	// 合理设置Embedding客户端的超时时间
+	finalTimeout := max(cfg.Timeout, cfg.BatchTimeout)
+
+	if finalTimeout == 0 {
+		finalTimeout = 60
+	}
+
+	config.HTTPClient = &http.Client{Timeout: time.Duration(finalTimeout) * time.Second}
+
+	openAIClient := openai.NewClientWithConfig(config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// 通过ListModels接口验证向量化服务是否可用
+	if _, err := openAIClient.ListModels(ctx); err != nil {
+		err = fmt.Errorf("无法连接到向量化服务 (url: %s): %w", config.BaseURL, err)
+		global.Log.Warnf("初始化向量化服务失败: %v", err)
+		return err
+	}
+
+	global.EmbeddingService = embedding.NewClient(
+		openAIClient,
+		cfg.Model,
+	)
+	global.Log.Info("初始化向量化服务成功")
+	return nil
+}
+
+func (i *Initializer) initMcp() error {
+	if len(global.Config.McpServers) == 0 {
+		return nil
+	}
+	client, err := mcp.NewClient(global.Log, global.Config.McpServers, global.Version, global.Config.ProjectName)
+	if err != nil {
+		global.Log.Warnf("MCP服务初始化失败: %v", err)
+		return err
+	}
+	global.McpService = client
+	global.Log.Info("初始化MCP服务结束")
+	return nil
+}
+
+func (i *Initializer) mcpClose() error {
+	if global.McpService != nil {
+		return global.McpService.Close()
+	}
+	return nil
+}
