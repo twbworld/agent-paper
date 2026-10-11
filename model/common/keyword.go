@@ -13,6 +13,7 @@ type KnowledgeItem struct {
 	Answer    string      `json:"answer"`              // 预设回复的内容
 	Questions []*Question `json:"questions"`           // 关联的问题/关键字列表
 	UpdatedAt int64       `json:"updatedAt,omitempty"` // 该知识条目下所有问题中最新的更新时间
+	HitCount  int64       `json:"hitCount"`            // 命中拦截次数统计
 }
 
 // UpsertKnowledgeItemRequest 是创建或更新知识条目的请求体。

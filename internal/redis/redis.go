@@ -34,6 +34,7 @@ type Service interface {
 	Get(ctx context.Context, key string) *redis.StringCmd
 	Set(ctx context.Context, key string, value any, expiration time.Duration) *redis.StatusCmd
 	Del(ctx context.Context, keys ...string) *redis.IntCmd
+	Incr(ctx context.Context, keys string) *redis.IntCmd
 	HGetAll(ctx context.Context, key string) *redis.StringStringMapCmd
 	HSet(ctx context.Context, key string, values ...any) *redis.IntCmd
 	HDel(ctx context.Context, key string, fields ...string) *redis.IntCmd
@@ -86,6 +87,10 @@ func (c *client) Set(ctx context.Context, key string, value any, expiration time
 
 func (c *client) Del(ctx context.Context, keys ...string) *redis.IntCmd {
 	return c.rdb.Del(ctx, keys...)
+}
+
+func (c *client) Incr(ctx context.Context, key string) *redis.IntCmd {
+	return c.rdb.Incr(ctx, key)
 }
 
 func (c *client) HGetAll(ctx context.Context, key string) *redis.StringStringMapCmd {

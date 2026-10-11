@@ -25,6 +25,11 @@ func (i *Initializer) timerStart(taskManager *task.Manager) error {
 		return err
 	}
 
+	// 每天凌晨4点扫描知识盲区
+	if err := i.startCronJob(taskManager.DiscoverBlindSpots, "0 4 * * *"); err != nil {
+		return err
+	}
+
 	i.cron.Start() //已含协程
 	global.Log.Infoln("定时器启动成功")
 	return nil

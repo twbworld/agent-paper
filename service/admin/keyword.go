@@ -84,6 +84,13 @@ func (s *keywordService) ListItems(ctx context.Context) ([]*common.KnowledgeItem
 				Questions: []*common.Question{},
 				UpdatedAt: updatedAtUnix,
 			}
+			// 附加命中次数统计
+			if global.RedisClient != nil {
+				hitCountStr, _ := global.RedisClient.Get(ctx, fmt.Sprintf("kb:hit:%s", contentHash)).Result()
+				if hitCountStr != "" {
+					fmt.Sscanf(hitCountStr, "%d", &item.HitCount)
+				}
+			}
 			groupedItems[contentHash] = item
 		}
 
@@ -122,6 +129,19 @@ func (s *keywordService) UpsertItem(ctx context.Context, req *common.UpsertKnowl
 	const maxQuestionsPerItem = 20
 	if len(req.Questions) > maxQuestionsPerItem {
 		return fmt.Errorf("每个知识条目最多只能关联 %d 个问题", maxQuestionsPerItem)
+	}
+
+	// 冲突与冗余检测
+	for _, q := range req.Questions {
+		if q.Type == string(enum.KeywordTypeSemantic) || q.Type == string(enum.KeywordTypeHybrid) {
+			results, err := dao.App.VectorDb.Search(ctx, q.Question, 1)
+			// 若存在极度相似的存量问题，且非当前正在编辑的内容本身，则触发拦截
+			if err == nil && len(results) > 0 && results[0].Similarity > 0.95 {
+				if req.ID == "" || utils.Hash(results[0].Answer) != req.ID {
+					return fmt.Errorf("提交失败：问题 '%s' 与已有知识库冲突 (相似度: %.2f)", q.Question, results[0].Similarity)
+				}
+			}
+		}
 	}
 
 	// 1. 对于更新操作，先删除 Chatwoot 上的旧条目

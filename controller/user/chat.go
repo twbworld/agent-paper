@@ -348,6 +348,7 @@ func (c *ChatApi) processMessageAsync(ctx context.Context, req common.ChatReques
 
 	// 匹配到快捷回复
 	if cannedAnswer != "" {
+		go global.RedisClient.Incr(context.Background(), fmt.Sprintf("kb:hit:%s", utils.Hash(cannedAnswer)))
 		service.Service.UserServiceGroup.ActionService.SendMessage(ctx, req.Conversation.ID, cannedAnswer)
 		go service.Service.UserServiceGroup.HistoryService.Append(context.Background(), req.Conversation.ID, common.LlmMessage{Role: openai.ChatMessageRoleUser, Content: req.Content}, common.LlmMessage{Role: openai.ChatMessageRoleAssistant, Content: cannedAnswer})
 		return
@@ -439,7 +440,8 @@ func (c *ChatApi) processMessageAsync(ctx context.Context, req common.ChatReques
 	// 3. 高相似度直接回答
 	if len(vectorResults) > 0 && vectorResults[0].Similarity >= global.Config.Ai.VectorSimilarityThreshold {
 		chosenVectorAnswer := vectorResults[0].Answer
-		global.Log.Debugf("[processMessageAsync] 向量搜索高相似度匹配，提前响应, 相似度: %.4f, 会话ID: %d", vectorResults[0].Similarity, req.Conversation.ID)
+		global.Log.Debugf("[processMessageAsync] 向量搜索高相似度匹配，提前响应...")
+		go global.RedisClient.Incr(context.Background(), fmt.Sprintf("kb:hit:%s", utils.Hash(chosenVectorAnswer)))
 		service.Service.UserServiceGroup.ActionService.SendMessage(ctx, req.Conversation.ID, chosenVectorAnswer)
 		go service.Service.UserServiceGroup.HistoryService.Append(context.Background(), req.Conversation.ID, common.LlmMessage{Role: openai.ChatMessageRoleUser, Content: req.Content}, common.LlmMessage{Role: openai.ChatMessageRoleAssistant, Content: chosenVectorAnswer})
 		return

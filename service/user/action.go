@@ -186,6 +186,10 @@ func (a *actionService) TransferToHuman(ctx context.Context, ConversationID uint
 		return err
 	}
 
+	if global.RedisClient != nil {
+		_ = global.RedisClient.HSet(context.Background(), "kb:blind_spots_queue", ConversationID, time.Now().Unix()).Err()
+	}
+
 	return nil
 }
 
